@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#102a43">
+  <title>Bollo Chiaro 2026</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section id="fatal" class="screen" hidden>
+      <div class="brand"><span class="logo">B</span><strong>Bollo Chiaro 2026</strong></div>
+      <h1>Serve un aggiornamento</h1>
+      <p id="fatalText" class="lead">La versione caricata non è coerente. Ricarica la pagina.</p>
+      <button id="reloadBtn" class="primary">Ricarica</button>
+    </section>
+
+    <section id="login" class="screen">
+      <div class="brand"><span class="logo">B</span><strong>Bollo Chiaro 2026</strong></div>
+      <h1>Scopri se il tuo caso può rientrare nell’esenzione bollo</h1>
+      <p class="lead">Racconta il tuo caso. Il consulente IA ti farà una domanda alla volta, solo quando serve, fino a un massimo di 13 domande.</p>
+      <form id="loginForm" novalidate>
+        <label for="email">Email usata per l’acquisto</label>
+        <input id="email" name="email" type="email" inputmode="email" autocomplete="email" placeholder="nome@email.it" required>
+        <p id="loginError" class="error" role="alert"></p>
+        <button id="loginBtn" class="primary" type="submit">Accedi alla mia pratica</button>
+      </form>
+      <a id="freeGuideLogin" class="secondary link-button" href="https://stan.store/FEURRADIGITAL/p/non-pagare-il-bollo-auto-guida-completa-legge-104" target="_blank" rel="noopener noreferrer">Scarica la guida PDF su Stan Store</a>
+      <div class="notice">Ogni acquisto abilita una sola pratica. Usa la stessa email dell’acquisto. Non inserire codice fiscale, targa completa o documenti sanitari.</div>
+      <p class="legal">Lo strumento fornisce orientamento informativo. L’esenzione definitiva dipende dai requisiti di legge e, dove previsto, dalle regole e dagli uffici competenti della tua Regione.</p>
+    </section>
+
+    <section id="chatScreen" class="screen" hidden>
+      <header class="chat-head">
+        <div><strong>Bollo Chiaro 2026</strong><span id="counter" class="counter">0/13 domande IA</span></div>
+        <button id="logoutBtn" class="text-button" type="button">Esci</button>
+      </header>
+      <div id="chat" class="chat" aria-live="polite"></div>
+      <form id="chatForm" class="composer">
+        <textarea id="message" maxlength="4000" rows="2" placeholder="Scrivi qui…" aria-label="Messaggio" required></textarea>
+        <button id="sendBtn" class="primary send" type="submit">Invia</button>
+      </form>
+      <p id="chatError" class="error" role="alert"></p>
+      <p class="microcopy">Una domanda alla volta. Se le informazioni bastano, l’IA conclude prima di arrivare a 13.</p>
+    </section>
+
+    <section id="resultScreen" class="screen result" hidden>
+      <div class="brand"><span class="logo">B</span><strong>Bollo Chiaro 2026</strong></div>
+      <div id="resultBadge" class="result-badge">✓</div>
+      <h1 id="resultTitle">Il tuo risultato</h1>
+      <article id="printArea" class="result-card">
+        <h2>Bollo Chiaro 2026 — valutazione personalizzata</h2>
+        <p id="generatedAt" class="muted"></p>
+        <section><h3>Valutazione</h3><p id="summary"></p></section>
+        <section><h3>Perché</h3><p id="why"></p></section>
+        <section><h3>Cosa verificare</h3><ul id="checks"></ul></section>
+        <section><h3>Documenti utili</h3><ul id="documents"></ul></section>
+        <section><h3>Prossimi passi</h3><ol id="steps"></ol></section>
+        <section><h3>Ente da contattare</h3><p id="authority"></p></section>
+        <p id="disclaimer" class="legal"></p>
+      </article>
+      <div class="actions">
+        <button id="printBtn" class="primary" type="button">Stampa / salva il risultato in PDF</button>
+        <a id="freeGuideResult" class="secondary link-button" href="https://stan.store/FEURRADIGITAL/p/non-pagare-il-bollo-auto-guida-completa-legge-104" target="_blank" rel="noopener noreferrer">Scarica la guida PDF su Stan Store</a>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

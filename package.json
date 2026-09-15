@@ -1,0 +1,14 @@
+{
+  "name": "bollo-chiaro-2026",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute bollo-chiaro-2026 --remote --file=./schema.sql",
+    "test": "node --test tests/*.test.mjs && python3 tests/schema_test.py && python3 tests/business_flow_test.py && python3 tests/static_check.py"
+  },
+  "devDependencies": {
+    "wrangler": ">=4.20.0 <5"
+  }
+}
