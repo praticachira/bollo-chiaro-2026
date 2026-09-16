@@ -1,35 +1,32 @@
-# Audit Bollo Chiaro v3.0.0
+# Audit Bollo Chiaro 2026 — v3.1.0
 
-Ricostruito da zero il 15/09/2026.
+Audit tecnico del 16/09/2026.
 
-## Confini del test
+## Verificato automaticamente
 
-Testabile localmente: struttura del progetto, sintassi JavaScript, funzioni pure, richiesta OpenAI simulata, schema SQL, vincoli D1, logica del limite 13, configurazione frontend, endpoint previsti, sicurezza statica, pacchetto ZIP.
+- sintassi Worker e frontend;
+- schema e vincoli D1;
+- un acquisto abilita una sola pratica;
+- massimo 13 domande IA;
+- errori OpenAI non consumano un turno;
+- output strutturato e concreto;
+- ripresa pratica e disponibilità risultato per 24 ore;
+- consumo dopo stampa/salvataggio PDF;
+- link separato al PDF gratuito;
+- verifica firma Stripe, compresa rotazione con più firme `v1`;
+- normalizzazione pagamenti e rimborsi Stripe/PayPal;
+- idempotenza di ordini ed eventi webhook;
+- revoca sessioni dopo rimborso o contestazione;
+- filtro del prodotto Bollo Chiaro;
+- assenza di secret nel browser e di CDN esterne;
+- handshake versione frontend/backend.
 
-Non testabile senza credenziali/servizi dell'utente: deploy reale Cloudflare, vero D1 remoto, vera `OPENAI_API_KEY`, credito/rate limit OpenAI, evento reale Stan/Zapier. Per questo è incluso `/api/diagnostic`, da usare subito dopo il deploy e prima di Stan.
+## Configurazione esterna da validare dal vivo
 
-## Scelte di robustezza
+Il codice locale non può dimostrare il contenuto reale inviato da Stan Store ai conti Stripe e PayPal dell'utente. Prima della vendita pubblica sono obbligatori due acquisti controllati a prezzo minimo, uno con Stripe e uno con PayPal, seguiti dalla verifica dell'accesso e del rimborso/revoca.
 
-- nuovo DB: nessuna migrazione del vecchio schema;
-- token sessione casuale, in D1 solo HMAC del token;
-- più sessioni possono riaprire la stessa pratica senza creare una seconda pratica;
-- `UNIQUE(purchase_id)` impedisce due pratiche per lo stesso acquisto;
-- `CHECK questions_asked BETWEEN 0 AND 13` protegge il limite anche a livello DB;
-- lock con scadenza evita due risposte concorrenti sulla stessa pratica;
-- i messaggi vengono registrati solo dopo una risposta OpenAI valida;
-- al completamento la cronologia viene cancellata;
-- provisioning idempotente su `provider_order_id` e rifiuta collisioni con email/provider diversi;
-- versione frontend/backend verificata tramite `x-app-version`;
-- static assets `no-store` per ridurre cache di versioni vecchie;
-- nessuna libreria/CDN terza nel browser.
+L'informativa privacy inclusa descrive il funzionamento tecnico. Prima della vendita il venditore deve coordinare i propri dati identificativi e i recapiti nella pagina Stan Store.
 
-## Esito test automatici finali
+## Criterio di pubblicazione
 
-- `node --check src/index.js`: OK
-- `node --check public/app.js`: OK
-- Node test suite: 10/10 OK
-- schema D1: OK
-- business flow simulato: OK
-- controlli statici: OK
-
-Il business-flow test verifica esplicitamente: massimo 13 domande IA, impossibilità di una 14ª a livello DB, 1 acquisto = 1 pratica, secondo acquisto = seconda pratica, cancellazione cronologia al risultato, idempotenza ordine per provider e cleanup sessioni.
+Il progetto è pronto al deploy quando `npm test` passa. È pronto alla vendita soltanto dopo: diagnostica remota, webhook Stripe, IPN PayPal, accesso con email, completamento pratica, PDF risultato, PDF regalo e revoche per rimborso.

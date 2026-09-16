@@ -61,3 +61,34 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   count INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS practice_deliveries (
+  practice_id TEXT PRIMARY KEY,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (practice_id) REFERENCES practices(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS payment_refs (
+  provider TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  purchase_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'payment',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY(provider, external_id),
+  FOREIGN KEY (purchase_id) REFERENCES purchases(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_refs_purchase ON payment_refs(purchase_id);
+
+CREATE TABLE IF NOT EXISTS webhook_events (
+  provider TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('received','processed','ignored','failed')),
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  processed_at TEXT,
+  PRIMARY KEY(provider, event_id)
+);

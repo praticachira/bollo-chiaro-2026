@@ -10,8 +10,10 @@
   },
   "vars": {
     "AI_MODEL": "gpt-5.6-terra",
-    "SESSION_DAYS": "14",
-    "FREE_PDF_URL": "https://stan.store/FEURRADIGITAL/p/non-pagare-il-bollo-auto-guida-completa-legge-104"
+    "SESSION_DAYS": "1",
+    "FREE_PDF_URL": "https://stan.store/FEURRADIGITAL/p/pratica-chiara--guida-informativa-gratuita",
+    "BOLLO_PRODUCT_MARKERS": "bollo chiaro 2026|bollo chiaro",
+    "PAYPAL_MODE": "live"
   },
   "d1_databases": [
     {
