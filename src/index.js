@@ -1,4 +1,4 @@
-const VERSION = '3.0.0';
+const VERSION = '3.1.0';
 const MAX_QUESTIONS = 13;
 const MAX_MESSAGE_CHARS = 4000;
 const encoder = new TextEncoder();
@@ -62,9 +62,12 @@ export default {
       if (url.pathname === '/api/health' && request.method === 'GET') return health(env);
       if (url.pathname === '/api/diagnostic' && request.method === 'POST') return diagnostic(request,env);
       if (url.pathname === '/api/provision' && request.method === 'POST') return provision(request,env);
+      if (url.pathname === '/api/webhooks/stripe' && request.method === 'POST') return stripeWebhook(request,env);
+      if (url.pathname === '/api/webhooks/paypal' && request.method === 'POST') return paypalWebhook(request,env);
       if (url.pathname === '/api/access' && request.method === 'POST') return access(request,env);
       if (url.pathname === '/api/resume' && request.method === 'GET') return resume(request,env);
       if (url.pathname === '/api/chat' && request.method === 'POST') return chat(request,env);
+      if (url.pathname === '/api/consume' && request.method === 'POST') return consumeResult(request,env);
       return json(env,{error:'Risorsa non trovata.',code:'NOT_FOUND'},404);
     } catch (error) {
       if(error instanceof PublicError) return json(env,{error:error.message,code:error.code},error.status);
@@ -85,7 +88,9 @@ async function access(request, env){
   let practice = await env.DB.prepare(`
     SELECT pr.id,pr.purchase_id,pr.email,pr.status,pr.questions_asked,pr.result_json
     FROM practices pr JOIN purchases p ON p.id=pr.purchase_id
-    WHERE pr.email=? AND pr.status='active' AND p.status='active'
+    LEFT JOIN practice_deliveries pd ON pd.practice_id=pr.id
+    WHERE pr.email=? AND p.status='active'
+      AND (pr.status='active' OR (pr.status='completed' AND pd.consumed_at IS NULL AND datetime(pd.expires_at)>datetime('now')))
     ORDER BY pr.updated_at DESC LIMIT 1`).bind(email).first();
 
   if(!practice){
@@ -115,7 +120,7 @@ async function access(request, env){
   const sessionDays = clampInt(env.SESSION_DAYS,14,1,30);
   const expiresAt = new Date(Date.now()+sessionDays*86400000).toISOString();
   await env.DB.prepare(`INSERT INTO sessions(id,practice_id,token_hash,expires_at) VALUES(?,?,?,?)`).bind(crypto.randomUUID(),practice.id,tokenHash,expiresAt).run();
-  const messages=await getMessages(env,practice.id);
+  const messages=practice.status==='active'?await getMessages(env,practice.id):[];
   return json(env,{token,questions_asked:practice.questions_asked||0,messages,result:practice.result_json?safeJson(practice.result_json):null});
 }
 
@@ -160,9 +165,11 @@ async function chat(request,env){
     }
 
     const resultJson=JSON.stringify(validated.result);
+    const resultExpiresAt=new Date(Date.now()+86400000).toISOString();
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO messages(practice_id,role,content) VALUES(?,'user',?)`).bind(practice.id,message),
       env.DB.prepare(`UPDATE practices SET status='completed',result_json=?,completed_at=datetime('now'),updated_at=datetime('now'),processing_token=NULL,processing_at=NULL WHERE id=? AND processing_token=?`).bind(resultJson,practice.id,lock),
+      env.DB.prepare(`INSERT INTO practice_deliveries(practice_id,expires_at) VALUES(?,?) ON CONFLICT(practice_id) DO UPDATE SET expires_at=excluded.expires_at,consumed_at=NULL`).bind(practice.id,resultExpiresAt),
       env.DB.prepare(`DELETE FROM messages WHERE practice_id=?`).bind(practice.id)
     ]);
     return json(env,{questions_asked:fresh.questions_asked||0,result:validated.result});
@@ -193,6 +200,117 @@ async function provision(request,env){
   return json(env,{ok:true,id,idempotent:false},201);
 }
 
+async function consumeResult(request,env){
+  const auth=await authenticate(request,env,{allowCompleted:true});
+  if(auth.error) return auth.error;
+  if(auth.practice.status!=='completed'||!auth.practice.result_json) return json(env,{error:'Il risultato non è ancora disponibile.',code:'RESULT_NOT_READY'},409);
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE practice_deliveries SET consumed_at=datetime('now') WHERE practice_id=? AND consumed_at IS NULL`).bind(auth.practice.id),
+    env.DB.prepare(`DELETE FROM sessions WHERE practice_id=?`).bind(auth.practice.id)
+  ]);
+  return json(env,{ok:true,consumed:true});
+}
+
+async function stripeWebhook(request,env){
+  const raw=await readRawBody(request,1_000_000);
+  const secret=await requireSecret(env,'STRIPE_WEBHOOK_SECRET');
+  const signature=request.headers.get('stripe-signature')||'';
+  if(!await verifyStripeSignature(raw,signature,secret)) return json(env,{error:'Firma Stripe non valida.',code:'WEBHOOK_SIGNATURE_INVALID'},400);
+  let event;try{event=JSON.parse(raw);}catch{throw new PublicError('Evento Stripe non valido.','WEBHOOK_INVALID',400);}
+  return processPaymentEvent(env,'stripe',event.id,event.type,event);
+}
+
+async function paypalWebhook(request,env){
+  const raw=await readRawBody(request,1_000_000);
+  const params=new URLSearchParams(raw);
+  if(!await verifyPayPalIpn(raw,env)) return json(env,{error:'Notifica PayPal non valida.',code:'WEBHOOK_SIGNATURE_INVALID'},400);
+  const txnId=cleanId(params.get('txn_id')||params.get('parent_txn_id'),220);
+  const status=cleanId(params.get('payment_status')||params.get('txn_type'),120);
+  const eventId=cleanId(params.get('ipn_track_id'),220)||`${txnId}:${status}`;
+  return processPaymentEvent(env,'paypal',eventId,status,Object.fromEntries(params.entries()));
+}
+
+async function processPaymentEvent(env,provider,eventId,eventType,event){
+  if(!cleanId(eventId,220)||!cleanId(eventType,120)) throw new PublicError('Evento incompleto.','WEBHOOK_INVALID',400);
+  const seen=await env.DB.prepare(`SELECT status FROM webhook_events WHERE provider=? AND event_id=?`).bind(provider,eventId).first();
+  if(seen?.status==='processed'||seen?.status==='ignored') return json(env,{ok:true,idempotent:true});
+  await env.DB.prepare(`INSERT INTO webhook_events(provider,event_id,event_type,status) VALUES(?,?,?,'received') ON CONFLICT(provider,event_id) DO NOTHING`).bind(provider,eventId,eventType).run();
+  try{
+    const normalized=provider==='stripe'?await normalizeStripeEvent(env,eventType,event):normalizePayPalIpn(eventType,event);
+    if(!normalized){await finishWebhook(env,provider,eventId,'ignored','');return json(env,{ok:true,ignored:true});}
+    if(normalized.action==='revoke'){
+      await revokeByRefs(env,provider,normalized.refs);
+      await finishWebhook(env,provider,eventId,'processed','');
+      return json(env,{ok:true,revoked:true});
+    }
+    if(!isBolloProduct(normalized.productText,env)){await finishWebhook(env,provider,eventId,'ignored','product_mismatch');return json(env,{ok:true,ignored:true});}
+    if(!normalized.email||!normalized.orderId) throw new PublicError('Nel pagamento mancano email o identificativo ordine.','PAYMENT_DATA_MISSING',422);
+    const purchase=await createPurchase(env,provider,normalized.orderId,normalized.email);
+    for(const ref of normalized.refs||[]) if(cleanId(ref.id,220)) await env.DB.prepare(`INSERT INTO payment_refs(provider,external_id,purchase_id,kind) VALUES(?,?,?,?) ON CONFLICT(provider,external_id) DO UPDATE SET purchase_id=excluded.purchase_id,kind=excluded.kind`).bind(provider,ref.id,purchase.id,cleanId(ref.kind,40)||'payment').run();
+    await finishWebhook(env,provider,eventId,'processed','');
+    return json(env,{ok:true,purchase_id:purchase.id,idempotent:purchase.idempotent});
+  }catch(error){await finishWebhook(env,provider,eventId,'failed',String(error?.code||error?.message||'error').slice(0,180));throw error;}
+}
+
+async function createPurchase(env,provider,orderId,email){
+  email=normalizeEmail(email); orderId=cleanId(orderId,220); provider=cleanId(provider,40);
+  const existing=await env.DB.prepare(`SELECT id,email FROM purchases WHERE provider=? AND provider_order_id=?`).bind(provider,orderId).first();
+  if(existing){if(existing.email!==email)throw new PublicError('Ordine già registrato con email diversa.','ORDER_MISMATCH',409);return {id:existing.id,idempotent:true};}
+  const id=crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO purchases(id,provider,provider_order_id,email,status) VALUES(?,?,?,?,'active')`).bind(id,provider,orderId,email).run();
+  return {id,idempotent:false};
+}
+
+async function normalizeStripeEvent(env,type,event){
+  const obj=event?.data?.object||{};
+  if(['charge.refunded','charge.dispute.created','payment_intent.canceled'].includes(type)){
+    return {action:'revoke',refs:[{id:obj.id,kind:'charge'},{id:obj.payment_intent,kind:'payment_intent'}].filter(x=>x.id)};
+  }
+  if(!['checkout.session.completed','payment_intent.succeeded'].includes(type)) return null;
+  let detail=obj;
+  if(type==='checkout.session.completed') detail=await stripeGet(env,`/v1/checkout/sessions/${encodeURIComponent(obj.id)}?expand[]=line_items`);
+  else detail=await stripeGet(env,`/v1/payment_intents/${encodeURIComponent(obj.id)}?expand[]=latest_charge`);
+  const lineItems=detail?.line_items?.data||[];
+  const productText=[detail?.description,detail?.metadata&&Object.values(detail.metadata).join(' '),...lineItems.map(x=>`${x.description||''} ${x.price?.nickname||''}`)].filter(Boolean).join(' ');
+  const email=normalizeEmail(detail?.customer_details?.email||detail?.customer_email||detail?.receipt_email||detail?.latest_charge?.billing_details?.email||obj?.receipt_email||'');
+  const refs=[{id:detail.id,kind:type.startsWith('checkout')?'checkout_session':'payment_intent'},{id:detail.payment_intent,kind:'payment_intent'},{id:detail.latest_charge?.id||detail.latest_charge,kind:'charge'}].filter(x=>x.id);
+  return {action:'grant',orderId:String(detail.payment_intent||detail.id||obj.id),email,productText,refs};
+}
+
+function normalizePayPalIpn(status,data){
+  const normalized=String(status||'').toLowerCase();
+  const txnId=cleanId(data?.txn_id,220),parentId=cleanId(data?.parent_txn_id,220);
+  if(['refunded','reversed','denied','voided'].includes(normalized)) return {action:'revoke',refs:[parentId,txnId].filter(Boolean).map(id=>({id,kind:'transaction'}))};
+  if(!['completed','processed'].includes(normalized)) return null;
+  const productText=[data?.item_name,data?.item_number,data?.custom,data?.invoice].filter(Boolean).join(' ');
+  return {action:'grant',orderId:txnId,email:normalizeEmail(data?.payer_email||''),productText,refs:[txnId].filter(Boolean).map(id=>({id,kind:'transaction'}))};
+}
+
+async function revokeByRefs(env,provider,refs){
+  const ids=(refs||[]).map(x=>cleanId(x.id,220)).filter(Boolean);
+  for(const id of ids){
+    const ref=await env.DB.prepare(`SELECT purchase_id FROM payment_refs WHERE provider=? AND external_id=?`).bind(provider,id).first();
+    if(ref?.purchase_id) await env.DB.batch([
+      env.DB.prepare(`UPDATE purchases SET status='revoked' WHERE id=?`).bind(ref.purchase_id),
+      env.DB.prepare(`DELETE FROM sessions WHERE practice_id IN (SELECT id FROM practices WHERE purchase_id=?)`).bind(ref.purchase_id)
+    ]);
+  }
+}
+
+async function finishWebhook(env,provider,eventId,status,error){await env.DB.prepare(`UPDATE webhook_events SET status=?,error=?,processed_at=datetime('now') WHERE provider=? AND event_id=?`).bind(status,error||null,provider,eventId).run();}
+function isBolloProduct(text,env){const hay=normalizeText(text);const markers=String(env.BOLLO_PRODUCT_MARKERS||'bollo chiaro 2026').split('|').map(normalizeText).filter(Boolean);return !!hay&&markers.some(m=>hay.includes(m));}
+async function stripeGet(env,path){const key=await requireSecret(env,'STRIPE_SECRET_KEY');const r=await fetch(`https://api.stripe.com${path}`,{headers:{Authorization:`Bearer ${key}`}});if(!r.ok)throw new PublicError('Stripe non ha restituito i dettagli del pagamento.','STRIPE_API_ERROR',502);return r.json();}
+function paypalIpnUrl(env){return String(env.PAYPAL_MODE||'live').toLowerCase()==='sandbox'?'https://ipnpb.sandbox.paypal.com/cgi-bin/webscr':'https://ipnpb.paypal.com/cgi-bin/webscr';}
+async function verifyPayPalIpn(raw,env){const r=await fetch(paypalIpnUrl(env),{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','User-Agent':'Bollo-Chiaro-2026-IPN/1.0'},body:`cmd=_notify-validate&${raw}`});return r.ok&&(await r.text()).trim()==='VERIFIED';}
+async function verifyStripeSignature(raw,header,secret,now=Math.floor(Date.now()/1000)){
+  const fields=header.split(',').map(p=>p.trim().split('=',2)).filter(x=>x.length===2);
+  const timestamp=Number(fields.find(([key])=>key==='t')?.[1]);
+  const signatures=fields.filter(([key])=>key==='v1').map(([,value])=>value);
+  if(!Number.isFinite(timestamp)||Math.abs(now-timestamp)>300||!signatures.length)return false;
+  const expected=await hmacHex(secret,`${timestamp}.${raw}`);
+  return signatures.some(signature=>timingSafeEqual(expected,signature));
+}
+
 async function health(env){
   let db=false;
   try{ const row=await env.DB.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='purchases'`).first(); db=!!row; }catch{}
@@ -202,7 +320,7 @@ async function health(env){
 async function diagnostic(request,env){
   const secret=await requireStrongSecret(env,'PROVISION_SECRET');
   if(!timingSafeEqual(secret,request.headers.get('x-provision-secret')||'')) return json(env,{error:'Non autorizzato.',code:'UNAUTHORIZED'},401);
-  const required=['purchases','practices','sessions','messages'];
+  const required=['purchases','practices','sessions','messages','practice_deliveries','payment_refs','webhook_events'];
   const found=[];
   for(const table of required){const r=await env.DB.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).bind(table).first(); if(r)found.push(table);}
   if(found.length!==required.length) return json(env,{ok:false,stage:'database',error:'Schema D1 incompleto.',found},503);
@@ -225,9 +343,10 @@ async function authenticate(request,env,{allowCompleted}){
   if(!token) return {error:json(env,{error:'Sessione non valida. Accedi di nuovo.',code:'SESSION_INVALID'},401)};
   const appSecret=await requireStrongSecret(env,'APP_SECRET');
   const tokenHash=await hmacHex(appSecret,token);
-  const row=await env.DB.prepare(`SELECT s.id AS session_id,s.expires_at,pr.*,p.status AS purchase_status FROM sessions s JOIN practices pr ON pr.id=s.practice_id JOIN purchases p ON p.id=pr.purchase_id WHERE s.token_hash=? LIMIT 1`).bind(tokenHash).first();
+  const row=await env.DB.prepare(`SELECT s.id AS session_id,s.expires_at,pr.*,p.status AS purchase_status,pd.consumed_at,pd.expires_at AS result_expires_at FROM sessions s JOIN practices pr ON pr.id=s.practice_id JOIN purchases p ON p.id=pr.purchase_id LEFT JOIN practice_deliveries pd ON pd.practice_id=pr.id WHERE s.token_hash=? LIMIT 1`).bind(tokenHash).first();
   if(!row||new Date(row.expires_at).getTime()<=Date.now()) return {error:json(env,{error:'Sessione scaduta. Accedi di nuovo.',code:'SESSION_INVALID'},401)};
   if(row.purchase_status!=='active') return {error:json(env,{error:'L’acquisto non è più attivo.',code:'PURCHASE_NOT_ACTIVE'},403)};
+  if(row.status==='completed'&&(row.consumed_at||(row.result_expires_at&&new Date(row.result_expires_at).getTime()<=Date.now()))) return {error:json(env,{error:'Il risultato è già stato scaricato o non è più disponibile. Per una nuova pratica serve un nuovo acquisto.',code:'PURCHASE_USED'},403)};
   if(!allowCompleted&&row.status!=='active') return {error:json(env,{error:'La pratica è già conclusa.',code:'PRACTICE_COMPLETED'},409)};
   await env.DB.prepare(`UPDATE sessions SET last_seen_at=datetime('now') WHERE id=?`).bind(row.session_id).run().catch(()=>{});
   return {practice:row,appSecret};
@@ -327,10 +446,13 @@ async function readJson(request,maxBytes){
   try{return JSON.parse(text||'{}');}catch{throw new PublicError('JSON non valido.','BAD_JSON',400);}
 }
 
+async function readRawBody(request,maxBytes){const len=Number(request.headers.get('content-length')||0);if(len&&len>maxBytes)throw new PublicError('Richiesta troppo grande.','BODY_TOO_LARGE',413);const text=await request.text();if(text.length>maxBytes)throw new PublicError('Richiesta troppo grande.','BODY_TOO_LARGE',413);return text;}
+
 async function requireSecret(env,name){const value=env?.[name]; if(typeof value==='string'&&value.trim()) return value.trim(); if(value&&typeof value.get==='function'){const v=await value.get();if(typeof v==='string'&&v.trim())return v.trim();} throw new Error(`Missing secret ${name}`);}
 async function requireStrongSecret(env,name){const v=await requireSecret(env,name);if(v.length<32)throw new Error(`${name} must be at least 32 characters`);return v;}
 function normalizeEmail(v){if(typeof v!=='string')return '';const s=v.trim().toLowerCase();return /^\S+@\S+\.\S+$/.test(s)&&s.length<=254?s:'';}
 function cleanId(v,max){if(typeof v!=='string'&&typeof v!=='number')return '';const s=String(v).trim();return s&&s.length<=max?s:'';}
+function normalizeText(v){return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();}
 function bearer(req){const h=req.headers.get('authorization')||'';return h.startsWith('Bearer ')?h.slice(7).trim():'';}
 function randomToken(bytes){const a=new Uint8Array(bytes);crypto.getRandomValues(a);return base64url(a);}
 function base64url(a){let s='';for(const b of a)s+=String.fromCharCode(b);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
@@ -345,4 +467,4 @@ function json(env,data,status=200){return new Response(JSON.stringify(data),{sta
 
 class PublicError extends Error{constructor(message,code,status){super(message);this.name='PublicError';this.code=code;this.status=status;}}
 
-export const __test={VERSION,MAX_QUESTIONS,outputSchema,validateAIEnvelope,isValidResult,extractOpenAIText,normalizeEmail,cleanId,requireSecret,requireStrongSecret,timingSafeEqual,hmacHex,callOpenAI,SYSTEM_PROMPT,NATIONAL_GUIDANCE};
+export const __test={VERSION,MAX_QUESTIONS,outputSchema,validateAIEnvelope,isValidResult,extractOpenAIText,normalizeEmail,cleanId,normalizeText,isBolloProduct,normalizePayPalIpn,verifyStripeSignature,requireSecret,requireStrongSecret,timingSafeEqual,hmacHex,callOpenAI,SYSTEM_PROMPT,NATIONAL_GUIDANCE};
