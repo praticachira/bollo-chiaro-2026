@@ -1,6 +1,6 @@
 'use strict';
 
-const EXPECTED_VERSION = '3.0.0';
+const EXPECTED_VERSION = '3.1.0';
 const API = '/api';
 const $ = (s) => document.querySelector(s);
 const state = { token: localStorage.getItem('bollo_session') || '', busy: false, result: null };
@@ -52,7 +52,10 @@ function renderResult(r){
 }
 
 $('#reloadBtn').addEventListener('click',()=>location.reload());
-$('#printBtn').addEventListener('click',()=>window.print());
+$('#printBtn').addEventListener('click',async()=>{
+  window.print();
+  try{await request('/consume',{method:'POST'});clearSession();}catch(error){window.alert(error.message||'Non sono riuscito a chiudere la pratica. Riprova.');}
+});
 $('#logoutBtn').addEventListener('click',()=>{clearSession();$('#chat').innerHTML='';show('#login');});
 
 $('#loginForm').addEventListener('submit',async(e)=>{
