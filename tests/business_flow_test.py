@@ -23,6 +23,10 @@ except sqlite3.IntegrityError:
 con.execute("insert into messages(practice_id,role,content) values('pr1','user','caso')")
 con.execute("insert into messages(practice_id,role,content) values('pr1','assistant','domanda')")
 con.execute("update practices set status='completed',result_json='{}',completed_at=datetime('now') where id='pr1'")
+con.execute("insert into practice_deliveries(practice_id,expires_at) values('pr1','2099-01-01T00:00:00Z')")
+assert con.execute("select consumed_at from practice_deliveries where practice_id='pr1'").fetchone()[0] is None
+con.execute("update practice_deliveries set consumed_at=datetime('now') where practice_id='pr1'")
+assert con.execute("select consumed_at from practice_deliveries where practice_id='pr1'").fetchone()[0] is not None
 con.execute("delete from messages where practice_id='pr1'")
 assert con.execute("select count(*) from messages where practice_id='pr1'").fetchone()[0]==0
 assert con.execute("select result_json from practices where id='pr1'").fetchone()[0]=='{}'

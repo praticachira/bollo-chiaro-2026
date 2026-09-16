@@ -5,7 +5,7 @@ con=sqlite3.connect(':memory:')
 con.executescript((ROOT/'schema.sql').read_text())
 
 def cols(t): return {r[1] for r in con.execute(f'pragma table_info({t})')}
-for table in ['purchases','practices','sessions','messages','rate_limits']:
+for table in ['purchases','practices','sessions','messages','rate_limits','practice_deliveries','payment_refs','webhook_events']:
     assert con.execute("select 1 from sqlite_master where type='table' and name=?",(table,)).fetchone(), table
 assert {'provider_order_id','email','status'} <= cols('purchases')
 assert {'purchase_id','questions_asked','result_json','processing_token'} <= cols('practices')
@@ -28,5 +28,15 @@ con.execute("insert into sessions(id,practice_id,token_hash,expires_at) values('
 try:
     con.execute("insert into sessions(id,practice_id,token_hash,expires_at) values('s2','pr1','h1','2099-01-01T00:00:00Z')")
     raise AssertionError('token hash non unique')
+except sqlite3.IntegrityError: pass
+con.execute("insert into payment_refs(provider,external_id,purchase_id,kind) values('stripe','pi_1','p1','payment_intent')")
+try:
+    con.execute("insert into payment_refs(provider,external_id,purchase_id,kind) values('stripe','pi_1','p1','payment_intent')")
+    raise AssertionError('riferimento pagamento duplicato')
+except sqlite3.IntegrityError: pass
+con.execute("insert into webhook_events(provider,event_id,event_type,status) values('stripe','evt_1','checkout.session.completed','processed')")
+try:
+    con.execute("insert into webhook_events(provider,event_id,event_type,status) values('stripe','evt_1','checkout.session.completed','processed')")
+    raise AssertionError('evento webhook duplicato')
 except sqlite3.IntegrityError: pass
 print('OK schema D1: tabelle, vincoli, 1 acquisto=1 pratica, max 13 protetti.')

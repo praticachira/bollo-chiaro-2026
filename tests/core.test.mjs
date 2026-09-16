@@ -69,10 +69,35 @@ import worker from '../src/index.js';
 test('routing meta restituisce versione e header coerente',async()=>{
   const res=await worker.fetch(new Request('https://example.test/api/meta'),{FREE_PDF_URL:'x'});
   assert.equal(res.status,200);
-  assert.equal(res.headers.get('x-app-version'),'3.0.0');
+  assert.equal(res.headers.get('x-app-version'),'3.1.0');
   const data=await res.json();
-  assert.equal(data.version,'3.0.0');
+  assert.equal(data.version,'3.1.0');
   assert.equal(data.max_questions,13);
+});
+
+test('riconosce esclusivamente i marcatori del prodotto configurati',()=>{
+  const env={BOLLO_PRODUCT_MARKERS:'bollo chiaro 2026|accesso bollo'};
+  assert.equal(__test.isBolloProduct('Acquisto: Bollo Chiaro 2026',env),true);
+  assert.equal(__test.isBolloProduct('Guida invalidità civile',env),false);
+});
+
+test('verifica firma Stripe e rifiuta timestamp vecchi',async()=>{
+  const secret='whsec_test',raw='{"id":"evt_1"}',now=1700000000;
+  const sig=await __test.hmacHex(secret,`${now}.${raw}`);
+  assert.equal(await __test.verifyStripeSignature(raw,`t=${now},v1=${sig}`,secret,now),true);
+  assert.equal(await __test.verifyStripeSignature(raw,`t=${now},v1=vecchia,v1=${sig}`,secret,now),true);
+  assert.equal(await __test.verifyStripeSignature(raw,`t=${now-600},v1=${sig}`,secret,now),false);
+});
+
+test('normalizza PayPal IPN completato e rimborso',()=>{
+  const paid=__test.normalizePayPalIpn('Completed',{txn_id:'TX1',payer_email:'CLIENTE@EXAMPLE.IT',item_name:'Bollo Chiaro 2026'});
+  assert.equal(paid.action,'grant');
+  assert.equal(paid.email,'cliente@example.it');
+  assert.match(paid.productText,/Bollo Chiaro/);
+  const refunded=__test.normalizePayPalIpn('Refunded',{txn_id:'RF1',parent_txn_id:'TX1'});
+  assert.equal(refunded.action,'revoke');
+  assert.equal(refunded.refs[0].id,'TX1');
+  assert.equal(__test.normalizePayPalIpn('Pending',{txn_id:'TX2'}),null);
 });
 
 test('provision e diagnostic rifiutano segreto errato prima del DB',async()=>{
